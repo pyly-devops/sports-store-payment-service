@@ -1,25 +1,28 @@
-# TODO: choose a base image.
-#   - Use a Python 3.11 image, "slim" variant recommended (smaller, fewer
-#     packages than the default image).
+﻿# Sports Store - payment service.
+#
+# Layer order is deliberate: requirements.txt is copied and installed before
+# the application source, so editing a .py file reuses the cached dependency
+# layer instead of reinstalling every package on every build.
 
-# TODO: set the working directory for the rest of the instructions below
-#   (e.g. /app).
+FROM python:3.11-slim
 
-# TODO: install dependencies.
-#   - Copy ONLY requirements.txt first, then run pip install.
-#   - Copying requirements.txt before the rest of the source means Docker
-#     can reuse this layer from cache when only your source code changes,
-#     instead of reinstalling every dependency on every build.
-#   - Use `pip install --no-cache-dir -r requirements.txt` to avoid
-#     bloating the image with pip's download cache.
+WORKDIR /app
 
-# TODO: copy the rest of the service source code into the image.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# TODO: document the port this service listens on.
-#   - This is metadata only — it does not publish the port. Publishing
-#     happens in docker-compose.yml.
+COPY . .
 
-# TODO: define the container's start command.
-#   - Run with uvicorn: `uvicorn main:app --host 0.0.0.0 --port 8000`
-#   - Binding to 0.0.0.0 (not 127.0.0.1) is required — otherwise the
-#     service is unreachable from other containers on the network.
+# Run as a non-root user. Nothing here needs root, and a container that does
+# not need it should not have it.
+RUN useradd --create-home --uid 1000 appuser
+USER appuser
+
+# Metadata only - this does not publish the port. Every service listens on
+# 8000 inside its own container; the gateway reaches them by service name,
+# so there is no need for five different internal ports.
+EXPOSE 8000
+
+# Bind 0.0.0.0, never 127.0.0.1 - a loopback bind is unreachable from other
+# containers on the compose network.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
