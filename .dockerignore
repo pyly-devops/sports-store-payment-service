@@ -1,0 +1,37 @@
+# Keep the build context to what the image actually needs.
+#
+# The Dockerfile ends in `COPY . .`, so without this file every one of these
+# lands in a layer of a published image. `.git/` is the one that matters: it is
+# the repository's entire history, it is useless at runtime, and Milestone 5 is
+# the point where these images stop being local and start being pushed to ECR.
+#
+# `tests/` and `pytest.ini` are DELIBERATELY NOT excluded. Milestone 6 gives
+# every service repo a workflow that lints and tests on pull requests, and if
+# that is ever done in a container stage rather than on the runner, the tests
+# have to be reachable from the build context. Excluding them would make a test
+# stage impossible rather than merely unused, which is a bigger loss than the
+# few KB they cost.
+
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+README.md
+
+# Python build artefacts. These are host-built, and on a different interpreter
+# or architecture than the image's - copying them in is worse than useless.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Virtualenvs. `pip install` already ran against requirements.txt inside the
+# image; a host venv would shadow it with the wrong platform's binaries.
+.venv/
+venv/
+
+# No service repo has a .env today. That is exactly why it is listed: this
+# costs nothing now and stops a developer's local credentials being baked into
+# a published image later. .env.example is intentionally NOT excluded - it
+# carries no secrets and documents the required variables.
+.env
