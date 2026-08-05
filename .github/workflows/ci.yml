@@ -87,6 +87,8 @@ jobs:
     env:
       # Matches var.app_components in sports-store-infrastructure.
       ECR_REPOSITORY: sports-store/payment-service
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -145,8 +147,114 @@ jobs:
             docker push "$image"
           fi
 
-          # Until Milestone 7 a human copies this into the deployments repo's
-          # environments/production/images/payment-service.yaml. Putting it on the run
-          # summary is the difference between a 30-second manual deploy step
-          # and digging through a log for it.
+          # bump-deployment (below) reads this job's `tag` output and opens the
+          # PR that used to be a human's copy-paste into the deployments repo's
+          # environments/production/images/payment-service.yaml. The run summary
+          # line stays: it's still the fastest way to eyeball what shipped
+          # without opening the bot's PR.
           echo "Pushed \`$TAG\` to \`$ECR_REPOSITORY\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # Separate job, not steps appended to publish: it puts the AWS identity and
+  # the git-write identity on different runners. publish can push an image and
+  # cannot touch git; this job can open a PR and cannot reach AWS.
+  bump-deployment:
+    needs: publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: {} # GITHUB_TOKEN cannot write to another repo at ANY level, so granting it anything here is theatre.
+    env:
+      SERVICE: payment-service
+      TAG: ${{ needs.publish.outputs.tag }}
+    steps:
+      # Mints a token scoped to exactly this App's installation on
+      # sports-store-deployments — narrower than the App's own installation,
+      # which is also installed on sports-store-gateway for the frontend-bump
+      # flow this repo doesn't need.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.DEPLOY_BOT_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_BOT_PRIVATE_KEY }}
+          owner: pyly-devops
+          repositories: sports-store-deployments
+
+      # ref: deploy/payment-service is deliberately NOT passed here.
+      # actions/checkout fails the whole step with "couldn't find remote
+      # ref" if the ref doesn't exist yet — which it won't, on the very
+      # first bump ever — so main is checked out unconditionally and the
+      # deploy branch (if any) is created/moved onto below instead.
+      - uses: actions/checkout@v4
+        with:
+          repository: pyly-devops/sports-store-deployments
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      # A stable branch name, no tag in it: deploy/payment-service means "the
+      # pending bump for payment-service", of which there is exactly one. A
+      # superseded bump replaces it rather than queuing behind an abandoned
+      # PR. Never rebase, this repo never force-pushes — merge main into
+      # whatever the branch already had, or start it fresh off main if this
+      # is the first bump ever.
+      - name: Move onto deploy/payment-service, merging main in
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin deploy/payment-service >/dev/null; then
+            git checkout -B deploy/payment-service origin/deploy/payment-service
+            git merge --no-edit origin/main || {
+              echo "::error::merge conflict against main — needs a human" >&2
+              exit 1
+            }
+          else
+            git checkout -B deploy/payment-service
+          fi
+
+      # mikefarah/yq's own Action wraps yq as a single --cmd string, which
+      # doesn't compose well with strenv's shell-quoting rules below; the
+      # binary invoked directly is more legible and behaves identically to
+      # the Tier 1 verification run against this exact command.
+      - name: Install yq
+        run: |
+          curl -sSL https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64 \
+            -o /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
+
+      - name: Bump the image tag
+        run: |
+          set -euo pipefail
+          # strenv, not a shell-interpolated string: the map key contains a
+          # hyphen (services.payment-service), and the tag is data, never a
+          # literal spliced into the query — this is the brief's
+          # "YAML-aware tool, never a text replace."
+          yq -i '.services[strenv(SERVICE)].image.tag = strenv(TAG)' \
+            helm/sports-store/environments/production/images/payment-service.yaml
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "no change — tag already at $TAG"
+            exit 0
+          fi
+          git config user.name "cloudcart-deploy-argocd-bot[bot]"
+          git config user.email "cloudcart-deploy-argocd-bot[bot]@users.noreply.github.com"
+          git add helm/sports-store/environments/production/images/payment-service.yaml
+          git commit -m "Bump payment-service to ${TAG}"
+          # A plain push, never --force: main was just merged in above, not
+          # rebased, so this branch's history is always a strict superset of
+          # what's on the remote. No force-push, ever (CLAUDE.md).
+          git push origin HEAD:deploy/payment-service
+
+      - name: Open or update the PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if gh pr view deploy/payment-service --repo pyly-devops/sports-store-deployments >/dev/null 2>&1; then
+            gh pr edit deploy/payment-service --repo pyly-devops/sports-store-deployments \
+              --body "Bumps \`payment-service\` to \`${TAG}\`. Merging this **is** the deploy — Argo CD picks it up automatically."
+          else
+            gh pr create --repo pyly-devops/sports-store-deployments \
+              --head deploy/payment-service --base main \
+              --title "Bump payment-service to ${TAG}" \
+              --body "Bumps \`payment-service\` to \`${TAG}\`. Merging this **is** the deploy — Argo CD picks it up automatically."
+          fi
