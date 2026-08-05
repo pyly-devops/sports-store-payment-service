@@ -36,8 +36,12 @@ class AsyncCursor:
             raise StopAsyncIteration
 
 
-def make_token(user_id="507f1f77bcf86cd799439011", email="user@test.com",
-               role="customer", expires_minutes=60):
+def make_token(
+    user_id="507f1f77bcf86cd799439011",
+    email="user@test.com",
+    role="customer",
+    expires_minutes=60,
+):
     payload = {
         "sub": user_id,
         "email": email,

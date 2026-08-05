@@ -1,0 +1,15 @@
+# Lint and formatting, introduced in Milestone 6 so that CI has something to
+# gate on. One tool covers both, which is why it wins over flake8 + black +
+# isort - three tools, three configs, three pinned versions.
+#
+# Measured before it was adopted rather than assumed: `ruff check` passed on
+# the existing code with no changes at all, and `ruff format` reformatted
+# two files, all under tests/, after which all 8 tests still passed.
+#
+# The rule set is written out rather than left implicit, so that upgrading
+# ruff cannot silently widen the gate: E4/E7/E9 are pycodestyle errors, F is
+# pyflakes. It is ruff's default today - stating it makes it a decision.
+target-version = "py311"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

@@ -1,0 +1,152 @@
+# CI for payment-service (Milestone 6).
+#
+# Two jobs, and the split between them is the security boundary:
+#
+#   verify   runs on every pull request AND on every push to main. It holds
+#            `contents: read` and nothing else, so it cannot even ask for an
+#            OIDC token, let alone reach AWS.
+#   publish  runs only on main, only after verify passed, and is the only job
+#            in this repo that requests `id-token: write`.
+#
+# What actually stops a pull request from publishing is not the `if:` below -
+# it is the trust policy on github-actions-sports-store-payment-service-ecr-push, whose sub
+# condition is `repo:pyly-devops/sports-store-payment-service:ref:refs/heads/main`. A PR run's
+# token carries `...:pull_request`, which never matches, so the AssumeRole call
+# fails outright. The `if:` makes that visible in the file; it is not what
+# makes it true.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel superseded PR runs; never cancel a main run. A cancelled main run is a
+# commit with no image in ECR, and because the next merge produces a different
+# hash, nothing ever retroactively builds it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the Dockerfile's base image on purpose. Testing on a
+      # different minor than the one that ships is how a green build fails in
+      # a pod.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      # requirements-dev.txt pulls in requirements.txt via -r, so this is one
+      # install, not two.
+      - name: Install
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Formatting
+        run: ruff format --check .
+
+      - name: Tests
+        run: python -m pytest -q
+
+      # No registry and no push - this job has no AWS identity by design.
+      # --platform is a no-op on an x86_64 runner and is kept so this command
+      # stays identical to the publish job's and to the workspace Makefile's.
+      - name: Build the image
+        run: docker build --platform linux/amd64 -t ci:${{ github.sha }} .
+
+      # requirements.txt is the runtime set, requirements-dev.txt adds the test
+      # tooling. That split is only safe if something proves the runtime set is
+      # complete: move a genuinely-needed package into dev and the tests stay
+      # green while the container breaks on first request. This is that proof,
+      # and it needs no database - the module graph imports on its own.
+      - name: The image can import its own application
+        run: docker run --rm ci:${{ github.sha }} python -c "import main"
+
+  publish:
+    needs: verify
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # Matches var.app_components in sports-store-infrastructure.
+      ECR_REPOSITORY: sports-store/payment-service
+    steps:
+      - uses: actions/checkout@v4
+
+      # No static AWS keys, ever (CLAUDE.md). vars.AWS_ACCOUNT_ID is a GitHub
+      # Actions ORGANISATION variable, not a secret: an account id
+      # authenticates as nothing and is already in git in the deployments
+      # repo. It lives in one place so a new account is one edit rather than
+      # seven PRs. The role name is written out because a reviewer should be
+      # able to see what this file publishes as without opening settings.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-sports-store-payment-service-ecr-push
+          aws-region: us-east-1 # matches envs/prod/variables.tf
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Compute the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          version=$(tr -d ' \n' < VERSION)
+          case "$version" in
+            latest|"") echo "::error::VERSION must not be '$version'"; exit 1 ;;
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::VERSION is not semver: '$version'"; exit 1 ;;
+          esac
+          # git's own answer, not ${GITHUB_SHA:0:7}. The workspace Makefile
+          # uses --short=7 too, so the two can never disagree about a commit
+          # even on the day git needs eight characters to disambiguate.
+          echo "tag=$version-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image="$REGISTRY/$ECR_REPOSITORY:$TAG"
+
+          # Plain docker build + push, NOT docker/build-push-action: buildx
+          # pushes an image index carrying provenance attestations, which show
+          # up in the ECR console as a phantom unknown/unknown platform next to
+          # every image. If this ever moves to buildx for its cache backends,
+          # it needs `provenance: false`.
+          docker build --platform linux/amd64 -t "$image" .
+
+          # ECR repositories are IMMUTABLE (Milestone 4). Re-running this
+          # workflow on the same commit would otherwise die on a tag that
+          # already exists - the least useful red X there is. Same guard as the
+          # workspace Makefile's push_if_new.
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+               --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "already in ECR, tag not moved: $image"
+          else
+            docker push "$image"
+          fi
+
+          # Until Milestone 7 a human copies this into the deployments repo's
+          # environments/production/images/payment-service.yaml. Putting it on the run
+          # summary is the difference between a 30-second manual deploy step
+          # and digging through a log for it.
+          echo "Pushed \`$TAG\` to \`$ECR_REPOSITORY\`" >> "$GITHUB_STEP_SUMMARY"
