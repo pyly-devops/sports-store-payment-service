@@ -1,9 +1,14 @@
+# Runtime dependencies ONLY. The Dockerfile installs this file and nothing
+# else, so anything added here ships inside the image that runs in the
+# cluster.
+#
+# Milestone 6 moved pytest, pytest-asyncio and (where it is not used at
+# runtime) httpx out of here and into requirements-dev.txt. Before that split
+# every pod carried the test framework. CI installs requirements-dev.txt,
+# which pulls this file in via -r, so nothing is installed twice.
 fastapi==0.104.1
 uvicorn==0.24.0
 motor==3.7.1
 pydantic==2.5.0
 python-dotenv==1.0.0
 PyJWT==2.8.0
-pytest==7.4.3
-pytest-asyncio==0.21.1
-httpx==0.25.2

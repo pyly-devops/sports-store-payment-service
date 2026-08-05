@@ -1,0 +1,15 @@
+# Test and lint tooling. CI installs THIS file; the Dockerfile installs
+# requirements.txt only, so none of this reaches the image.
+#
+# Everything is pinned exactly, ruff included. An unpinned formatter turns the
+# pipeline red on a day nobody committed anything, because a new release
+# changed its mind about a line break.
+-r requirements.txt
+
+pytest==7.4.3
+pytest-asyncio==0.21.1
+ruff==0.14.0
+
+# fastapi.testclient is built on httpx, so the tests need it even though no
+# application code in this repo makes an outbound HTTP call.
+httpx==0.25.2
