@@ -12,3 +12,20 @@ motor==3.7.1
 pydantic==2.5.0
 python-dotenv==1.0.0
 PyJWT==2.8.0
+
+# Milestone 8 — observability. Both are RUNTIME dependencies: the pod serves
+# /metrics and writes JSON logs, so neither may move to requirements-dev.txt.
+#
+# 6.1.0, NOT the current 7.x, and this is a hard constraint rather than
+# staleness. fastapi 0.104.1 pins starlette >=0.27.0,<0.28.0; every
+# instrumentator from 7.0.0 onward requires starlette >=0.30.0. The
+# intersection is empty and `pip install` fails outright — in CI, on the first
+# step, with a resolver backtrace rather than a readable message. 6.1.0
+# declares no starlette constraint at all. Verified by resolving it, not by
+# reading metadata: fastapi stays at 0.104.1 and starlette at 0.27.0.
+#
+# Unpinning this to 7.x means upgrading FastAPI across all five services,
+# which crosses Pydantic and Starlette behaviour changes. Worth doing; not
+# worth doing in the last milestone before a demo.
+prometheus-fastapi-instrumentator==6.1.0
+python-json-logger==4.1.0
