@@ -189,6 +189,23 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
+      # Set BEFORE the merge below, not just before the commit further down.
+      # A merge that isn't a fast-forward writes a merge commit, and git
+      # refuses to write any commit without an identity. Configuring this
+      # only in `Commit` made every bump fail with
+      #
+      #   fatal: empty ident name (for <runner@...>) not allowed
+      #
+      # whenever the previous bump was still an open PR — which is the normal
+      # state of the stable-branch design below, not an edge case. Invisible
+      # until then because a fast-forward writes no commit and needs no
+      # identity. Broke all six publishing repos on 2026-08-07.
+      - name: Configure the bot's git identity
+        run: |
+          set -euo pipefail
+          git config user.name "cloudcart-deploy-argocd-bot[bot]"
+          git config user.email "cloudcart-deploy-argocd-bot[bot]@users.noreply.github.com"
+
       # A stable branch name, no tag in it: deploy/payment-service means "the
       # pending bump for payment-service", of which there is exactly one. A
       # superseded bump replaces it rather than queuing behind an abandoned
@@ -200,10 +217,19 @@ jobs:
           set -euo pipefail
           if git ls-remote --exit-code --heads origin deploy/payment-service >/dev/null; then
             git checkout -B deploy/payment-service origin/deploy/payment-service
-            git merge --no-edit origin/main || {
-              echo "::error::merge conflict against main — needs a human" >&2
+            # Only call it a conflict once there are actually unmerged paths.
+            # This handler used to report EVERY merge failure as a conflict,
+            # which is precisely what hid the missing-identity fatal above it
+            # and sent a reader hunting for a content conflict that never
+            # existed. git's own message stays in the log either way.
+            if ! git merge --no-edit origin/main; then
+              if [ -n "$(git ls-files --unmerged)" ]; then
+                echo "::error::merge conflict against main on deploy/payment-service — needs a human" >&2
+              else
+                echo "::error::git merge failed for a non-conflict reason — see the git output above" >&2
+              fi
               exit 1
-            }
+            fi
           else
             git checkout -B deploy/payment-service
           fi
@@ -235,8 +261,7 @@ jobs:
             echo "no change — tag already at $TAG"
             exit 0
           fi
-          git config user.name "cloudcart-deploy-argocd-bot[bot]"
-          git config user.email "cloudcart-deploy-argocd-bot[bot]@users.noreply.github.com"
+          # Identity is configured once, before the merge — see the step above.
           git add helm/sports-store/environments/production/images/payment-service.yaml
           git commit -m "Bump payment-service to ${TAG}"
           # A plain push, never --force: main was just merged in above, not
