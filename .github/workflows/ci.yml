@@ -249,7 +249,15 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          if gh pr view deploy/payment-service --repo pyly-devops/sports-store-deployments >/dev/null 2>&1; then
+          # `gh pr view` finds a PR by head branch regardless of state — a
+          # branch whose only-ever PR already merged still "exists" to a
+          # bare existence check, so this used to edit the OLD merged PR's
+          # body and leave the new commit on the branch with nothing open
+          # to land it. Found live (M8 Tier 4 verification, 2026-08-07):
+          # every service's SECOND deploy ever did this silently. Checking
+          # state explicitly is the fix — anything but OPEN needs a new PR.
+          STATE=$(gh pr view deploy/payment-service --repo pyly-devops/sports-store-deployments --json state --jq .state 2>/dev/null || echo NONE)
+          if [ "$STATE" = "OPEN" ]; then
             gh pr edit deploy/payment-service --repo pyly-devops/sports-store-deployments \
               --body "Bumps \`payment-service\` to \`${TAG}\`. Merging this **is** the deploy — Argo CD picks it up automatically."
           else
